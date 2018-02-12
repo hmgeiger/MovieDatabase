@@ -1,0 +1,354 @@
+# Movie Ratings Database from Tweets
+## Heather Geiger
+## February 11,2018
+
+### Introduction
+
+Here I will use the MovieTweetings database from Github user sidooms.
+
+Link here: https://github.com/sidooms/MovieTweetings
+
+This is a dataset compiling tweets that gave clear reviews out of 10 for movies.
+
+Since this database is updated regularly, I have also posted to my Github the exact data I am using from this dataset for reproducibility.
+
+Link here: https://github.com/hmgeiger/MovieDatabase
+
+Lastly, I used rounding to map these reviews out of 10 onto a 5-star system instead.
+
+### Selecting "recent popular movies" for the database
+
+For this database, I chose the top 10 highest total grossing movies from the past 365 days according to Box Office Mojo.
+
+Link here: http://www.boxofficemojo.com/yearly/chart/past365.htm
+
+At the time of writing, these movies were:
+
+1. Star Wars: The Last Jedi
+2. Beauty and the Beast
+3. Wonder Woman
+4. Guardians of the Galaxy Vol. 2
+5. Jumanji: Welcome to the Jungle
+6. Spider-Man: Homecoming
+7. It
+8. Thor: Ragnarok
+9. Despicable Me 3
+10. Justice League
+
+### Selecting movies from MovieTweetings dataset
+
+First, we load the ratings.dat and movies.dat files into R.
+
+Ratings.dat is formatted like this: user_id::movie_id::rating::rating_timestamp
+
+Since ratings.dat has an ID for each movie rather than the actual name of the movie, we will need to use movies.dat to get the IDs for our movies of interest.
+
+Movies.dat is formatted like this: movie_id::movie_title (movie_year)::genre|genre|genre
+
+```{r}
+#Since these files are separated by "::", which will cause problems in R, let's use a quick system call to switch to tab-separated.
+#Already ran this so commenting these lines out now.
+#system("awk -F "::" '{ OFS="\t"}{print $1,$2,$3,$4}' ratings.dat > ratings.tsv")
+#system("awk -F "::" '{ OFS="\t"}{print $1,$2,$3}' movies.dat > movies.tsv")
+
+ratings <- read.table("ratings.tsv",sep="\t",stringsAsFactors=FALSE,
+	colClasses = c("character","character","integer","character"),
+	col.names = c("user","movie","rating","timestamp"))
+
+movies <- read.table("movies.tsv",sep="\t",stringsAsFactors=FALSE,quote="",comment.char="",
+	colClasses = c("character","character","character"),
+	col.names=c("id","movie","genre"))
+```
+
+Now, we pull out just the 10 movies we are interested in.
+To do this, first we use movies data frame to get the code, then select each movie code from ratings.
+
+```{r}
+movies_of_interest <- c("Star Wars: The Last Jedi","Beauty and the Beast","Wonder Woman","Guardians of the Galaxy Vol. 2","Jumanji: Welcome to the Jungle","Spider-Man: Homecoming","It","Thor: Ragnarok","Despicable Me 3","Justice League")
+
+movies_of_interest <- paste0(movies_of_interest," (2017)")
+
+movies[match(movies_of_interest,movies$movie),]
+
+movies_of_interest_codes <- movies$id[match(movies_of_interest,movies$movie)]
+
+ratings_movies_of_interest <- c()
+
+for(movie in movies_of_interest_codes)
+{
+ratings_movies_of_interest <- rbind(ratings_movies_of_interest,ratings[which(ratings$movie == movie),])
+}
+```
+
+Right now the data is in long format.
+
+Let's convert to wide, with each movie as a column and each user as a row.
+
+```{r}
+ratings_movies_of_interest <- reshape(ratings_movies_of_interest[,c("user","movie","rating")],idvar = "user",timevar = "movie",direction="wide")
+
+head(ratings_movies_of_interest)
+
+#Let's make "user" be the rownames, adding "user" as a prefix to each user ID.
+#And instead of e.g. rating.2527336, replace with movie2527336.
+
+rownames(ratings_movies_of_interest) <- paste0("user.",ratings_movies_of_interest$user)
+ratings_movies_of_interest <- ratings_movies_of_interest[,2:ncol(ratings_movies_of_interest)]
+colnames(ratings_movies_of_interest) <- paste0("movie",movies_of_interest_codes)
+
+head(ratings_movies_of_interest)
+```
+
+Let's now using rounding to convert from a 10-point to 5-point system.
+
+We'll divide by 2, then round up for odd numbers.
+
+So 1/10 and 2/10 = 1/5, 3/10 and 4/10 = 2/5, etc.
+
+```{r}
+ratings_movies_of_interest <- ceiling(ratings_movies_of_interest/2)
+
+#Now, convert back to integers.
+
+for(i in 1:ncol(ratings_movies_of_interest))
+{
+ratings_movies_of_interest[,i] <- as.integer(ratings_movies_of_interest[,i])
+}
+```
+
+Finally, let's save objects for ratings_movies_of_interest, plus the subset of movies that is just the code translation for our 10 movies of interest.
+
+Let's also reformat this subset of movies to better match ratings_movies_of_interest.
+
+We'll use these saved objects to compare to the ones we will later create from the SQL database of this information.
+
+```{r}
+movie_codes_vs_names_movies_of_interest <- movies[match(movies_of_interest,movies$movie),1:2]
+colnames(movie_codes_vs_names_movies_of_interest) <- c("id","movie")
+movie_codes_vs_names_movies_of_interest$id <- paste0("movie",movie_codes_vs_names_movies_of_interest$id)
+rownames(movie_codes_vs_names_movies_of_interest) <- 1:10
+movie_codes_vs_names_movies_of_interest
+
+save(list=c("ratings_movies_of_interest","movie_codes_vs_names_movies_of_interest"),
+file="ratings_movies_of_interest.Rdata")
+```
+
+We will also output these two objects into tsv files.
+
+```{r}
+write.table(data.frame(user = rownames(ratings_movies_of_interest),ratings_movies_of_interest),
+file="ratings_movies_of_interest.tsv",
+row.names=FALSE,col.names=TRUE,quote=FALSE,sep="\t")
+
+write.table(movie_codes_vs_names_movies_of_interest,
+file="movie_codes_vs_names_movies_of_interest.tsv",
+row.names=FALSE,col.names=TRUE,quote=FALSE,sep="\t")
+```
+
+### Creating the database
+
+Now, we will run the following code to create the SQL database.
+
+```{r,eval=FALSE}
+#This is the code to open up a MySQL shell. Subsequent commands (up to right before mysqldump) were entered within this shell.
+
+/usr/local/mysql/bin/mysql -u root -p
+
+CREATE DATABASE ratings_of_recent_popular_movies;
+USE ratings_of_recent_popular_movies;
+CREATE TABLE movienames(id varchar(255),movie varchar(255));
+LOAD DATA LOCAL INFILE 'movie_codes_vs_names_movies_of_interest.tsv' INTO TABLE movienames FIELDS TERMINATED BY "\t" IGNORE 1 LINES;
+CREATE TABLE ratings(user varchar(255),movie2527336 integer,movie2771200 integer,movie0451279 integer,movie3896198 integer,movie2283362 integer,movie2250912 integer,movie1396484 integer,movie3501632 integer,movie3469046 integer,movie0974015 integer);
+LOAD DATA LOCAL INFILE 'ratings_movies_of_interest.tsv' INTO TABLE ratings FIELDS TERMINATED BY "\t" IGNORE 1 LINES;
+
+#After this, quit the MySQL shell, then entered the following.
+
+/usr/local/mysql/bin/mysqldump -u root -p ratings_of_recent_popular_movies > ratings_of_recent_popular_movies.sql
+```
+
+### Loading the database back into R and checking for correctness
+
+Now, back to R, where I will read in the data from MySQL.
+
+```{r}
+#Clear all objects in the current environment so we can get a fresh start.
+
+rm(list=ls())
+
+#Now, ready to start reading in from MySql database.
+
+library(RMySQL)
+
+#Need to enter password to use the database.
+#Here I have my password in a text file that I will read in.
+
+mypassword <- as.vector(read.table("password.txt")$V1)
+
+myconnection <- dbConnect(MySQL(),dbname = "ratings_of_recent_popular_movies",user='root',password=mypassword,host='localhost')
+
+movienames_request <- dbSendQuery(myconnection,"SELECT * from movienames")
+movie_codes_vs_names_movies_of_interest_from_sql <- fetch(movienames_request,n=-1)
+
+movie_codes_vs_names_movies_of_interest_from_sql
+
+ratings_request <- dbSendQuery(myconnection,"SELECT * from ratings")
+ratings_movies_of_interest_from_sql <- fetch(ratings_request,n=-1)
+
+head(ratings_movies_of_interest_from_sql)
+
+#Format to be more like our original data frame.
+
+rownames(ratings_movies_of_interest_from_sql) <- ratings_movies_of_interest_from_sql[,1]
+ratings_movies_of_interest_from_sql <- ratings_movies_of_interest_from_sql[,2:ncol(ratings_movies_of_interest_from_sql)]
+ratings_movies_of_interest_from_sql[ratings_movies_of_interest_from_sql == 0] <- NA
+
+#Save objects.
+
+save(list=c("movie_codes_vs_names_movies_of_interest_from_sql","ratings_movies_of_interest_from_sql"),
+file="ratings_movies_of_interest_created_from_database.Rdata")
+```
+
+Load in our original data frames, and compare to those created using SQL.
+
+```{r}
+load("ratings_movies_of_interest.Rdata")
+
+identical(movie_codes_vs_names_movies_of_interest,movie_codes_vs_names_movies_of_interest_from_sql)
+identical(ratings_movies_of_interest,ratings_movies_of_interest_from_sql)
+```
+
+Data frame with the actual ratings is not identical between the one made in R and the one from the database. Why?
+
+```{r}
+#Let's look at number of rows and columns and a head for each object.
+
+dim(ratings_movies_of_interest)
+dim(ratings_movies_of_interest_from_sql)
+
+head(ratings_movies_of_interest)
+head(ratings_movies_of_interest_from_sql)
+
+#Maybe it's a class issue?
+
+for(i in 1:ncol(ratings_movies_of_interest))
+{
+print(class(ratings_movies_of_interest[,i]))
+}
+
+for(i in 1:ncol(ratings_movies_of_interest_from_sql))
+{
+print(class(ratings_movies_of_interest_from_sql[,i]))
+}
+
+#That doesn't seem to be the issue either.
+#Let's look at one column at a time now. Let's start with the first column.
+
+length(which(ratings_movies_of_interest[,1] == ratings_movies_of_interest_from_sql[,1]))
+
+#Interesting! Number of rows listed as equal is less than the total rows in both data frames.
+
+head(setdiff(1:nrow(ratings_movies_of_interest),which(ratings_movies_of_interest[,1] == ratings_movies_of_interest_from_sql[,1])))
+
+ratings_movies_of_interest[581:582,]
+
+ratings_movies_of_interest_from_sql[581:582,]
+
+#Very strange. These look identical, but R is perceiving them as not identical.
+#What if we tried replacing all NAs in both data frames with 0?
+
+ratings_movies_of_interest_with_zeroes <- ratings_movies_of_interest
+ratings_movies_of_interest_with_zeroes[is.na(ratings_movies_of_interest_with_zeroes)] <- 0
+
+ratings_movies_of_interest_from_sql_with_zeroes <- ratings_movies_of_interest_from_sql
+ratings_movies_of_interest_from_sql_with_zeroes[is.na(ratings_movies_of_interest_from_sql_with_zeroes)] <- 0
+
+identical(ratings_movies_of_interest_with_zeroes,ratings_movies_of_interest_from_sql_with_zeroes)
+
+#Maybe there were some true zeroes in ratings_movies_of_interest that we switched to NA when converting back from SQL?
+#Let's check.
+
+reviews_per_user_from_R_direct_dat <- apply(ratings_movies_of_interest,1,function(x)length(which(is.na(x) == FALSE)))
+reviews_per_user_from_sql <- apply(ratings_movies_of_interest_from_sql,1,function(x)length(which(is.na(x) == FALSE)))
+
+length(reviews_per_user_from_R_direct_dat)
+length(which(reviews_per_user_from_R_direct_dat == reviews_per_user_from_sql))
+
+#One user is not the same in these data frames.
+
+ratings_movies_of_interest[which(reviews_per_user_from_R_direct_dat != reviews_per_user_from_sql),]
+
+ratings_movies_of_interest_from_sql[which(reviews_per_user_from_R_direct_dat != reviews_per_user_from_sql),]
+
+#Looks like that's what happened! I hadn't considered the possibility that there might be at least a few real zeroes in the data, apart from the ones MySQL made to replace the NAs when I made the database.
+#This really should not be allowed, as the scale is supposed to be from 1 to 5.
+#Let's replace with an NA.
+
+ratings_movies_of_interest[which(reviews_per_user_from_R_direct_dat != reviews_per_user_from_sql),"movie2250912"] <- NA
+
+#Now the two data frames should be equal.
+
+identical(ratings_movies_of_interest,ratings_movies_of_interest_from_sql)
+
+```
+
+### Finally exploring the data!
+
+Now that we've done all this, let's start to actually look at the data!
+
+Question 1 - Of these 10 movies, how many of them did the typical Twitter user give a structured review?
+
+```{r}
+reviews_per_user <- apply(ratings_movies_of_interest,1,function(x)length(which(is.na(x) == FALSE)))
+
+table(reviews_per_user)
+```
+
+Looks like most people only reviewed 1 or 2 of these movies in a structured review.
+
+Which movies did people give structured reviews most frequently?
+
+```{r}
+reviews_per_movie <- apply(ratings_movies_of_interest,2,function(x)length(which(is.na(x) == FALSE)))
+
+reviews_per_movie <- data.frame(Movie = movie_codes_vs_names_movies_of_interest$movie,Number.reviews = reviews_per_movie,row.names=NULL)
+
+reviews_per_movie[order(reviews_per_movie$Number.reviews,decreasing=TRUE),]
+```
+
+Most of these movies have around 500-1100 reviews, with the exception of "Despicable Me 3" and "Jumanji: Welcome to the Jungle" which had substantially fewer.
+
+Finally, let's get the proportion of 1 to 5 star reviews for each movie and compare them.
+
+```{r}
+percent_1_to_5_star_reviews <- data.frame(One.star = c(),Two.star = c(),Three.star = c(),Four.star = c(),Five.star = c(),stringsAsFactors=FALSE)
+
+for(i in 1:ncol(ratings_movies_of_interest))
+{
+num_reviews <- reviews_per_movie$Number.reviews[i]
+num_1_to_5_star_reviews <- table(ratings_movies_of_interest[,i])
+percent_1_to_5_star_reviews_this_movie <- num_1_to_5_star_reviews*100/num_reviews
+percent_1_to_5_star_reviews <- rbind(percent_1_to_5_star_reviews,
+data.frame(One.star = percent_1_to_5_star_reviews_this_movie[1],
+Two.star = percent_1_to_5_star_reviews_this_movie[2],
+Three.star = percent_1_to_5_star_reviews_this_movie[3],
+Four.star = percent_1_to_5_star_reviews_this_movie[4],
+Five.star = percent_1_to_5_star_reviews_this_movie[5]))
+}
+
+#Make row names be names minus the year.
+
+for(i in 1:nrow(percent_1_to_5_star_reviews))
+{
+rownames(percent_1_to_5_star_reviews)[i] <- strsplit(movie_codes_vs_names_movies_of_interest$movie[i],"\\(")[[1]][1]
+}
+
+round(t(percent_1_to_5_star_reviews),digits=2)
+
+barplot(t(as.matrix(percent_1_to_5_star_reviews)),cex.names=0.5,las=2,col=c("#E69F00", "#56B4E9", "#009E73","#F0E442", "#0072B2"))
+```
+
+Interesting! The number of very poor (1 or 2-star, or 4/10 or less in original data) reviews is actually a lot lower than I expected it to be. 
+
+Star Wars: The Last Jedi and Thor:Ragnarok have higher proportions of 5-star reviews (or 9/10 to 10/10 in original data).
+
+Despicable Me 3 seems to have a much higher proportion of 3-star (5/10 or 6/10 in original data) reviews than the other movies.
